@@ -1,0 +1,18 @@
+{
+  "name": "get-commit-stats",
+  "version": "1.0.0",
+  "description": "CLI para buscar estatísticas de commits do GitHub",
+  "main": "get_commit_stats.js",
+  "bin": {
+    "commit-stats": "./get_commit_stats.js"
+  },
+  "scripts": {
+    "start": "node get_commit_stats.js"
+  },
+  "keywords": ["github", "commits", "stats", "cli"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "commander": "^12.0.0"
+  }
+}
