@@ -134,12 +134,251 @@ function buildQuery(usuarioValidado, inicio, fim, orgValidada, tipoDataValidado)
 const API_TIMEOUT = 90000;  // 90 segundos (aumentado para muitos commits)
 const MAX_PAGE_SIZE = 100;  // GitHub Search API: max 100 itens por página
 const MAX_SEARCH_RESULTS = 1000;  // GitHub Search API: max 1000 resultados totais
+const MAX_REPOS_PER_ORG = 1000;  // Limite de segurança para organizações muito grandes
+const MAX_COMMITS_PER_PAGE = 100;  // GitHub API: max 100 commits por página
+
+/**
+ * Classe para exibir barra de progresso visual
+ */
+class ProgressBar {
+    constructor(total, label = 'Progresso') {
+        this.total = total;
+        this.current = 0;
+        this.label = label;
+        this.startTime = Date.now();
+        this.width = 40;  // Largura da barra
+    }
+
+    update(increment = 1, extraInfo = '') {
+        this.current += increment;
+        this.render(extraInfo);
+    }
+
+    setCurrent(current, extraInfo = '') {
+        this.current = current;
+        this.render(extraInfo);
+    }
+
+    getProgress() {
+        return Math.min(100, (this.current / this.total) * 100);
+    }
+
+    getElapsed() {
+        return (Date.now() - this.startTime) / 1000;  // segundos
+    }
+
+    getETA() {
+        const elapsed = this.getElapsed();
+        if (this.current === 0) return 0;
+        const rate = this.current / elapsed;  // itens por segundo
+        const remaining = this.total - this.current;
+        return remaining / rate;  // segundos restantes
+    }
+
+    formatTime(seconds) {
+        if (seconds < 60) return `${Math.round(seconds)}s`;
+        if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+        return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+    }
+
+    render(extraInfo = '') {
+        const progress = this.getProgress();
+        const filled = Math.round((progress / 100) * this.width);
+        const bar = '='.repeat(filled) + (progress < 100 ? '>' : '') + ' '.repeat(Math.max(0, this.width - filled - (progress < 100 ? 1 : 0)));
+        const percentage = progress.toFixed(1).padStart(5);
+        const eta = this.formatTime(this.getETA());
+
+        // Limpar linha e imprimir progresso (usa \r para sobrescrever)
+        const output = `\r${this.label}: [${bar}] ${percentage}% | ${this.current}/${this.total} | ETA: ${eta}${extraInfo ? ' | ' + extraInfo : ''}`;
+        process.stderr.write(output);
+
+        // Nova linha ao completar
+        if (this.current >= this.total) {
+            process.stderr.write('\n');
+        }
+    }
+
+    complete(message = '') {
+        this.current = this.total;
+        const elapsed = this.formatTime(this.getElapsed());
+        this.render(`${message || 'Concluído'} | Tempo total: ${elapsed}`);
+    }
+}
+
+/**
+ * Lista todos os repositórios de uma organização
+ */
+function buscarRepositoriosDaOrganizacao(orgValidada) {
+    const repos = [];
+    let page = 1;
+    let hasMore = true;
+
+    while (hasMore && repos.length < MAX_REPOS_PER_ORG) {
+        try {
+            const cmd = `gh api "orgs/${orgValidada}/repos?per_page=${MAX_PAGE_SIZE}&type=all&page=${page}" --jq ".[].full_name"`;
+            const output = execSync(cmd, {
+                encoding: 'utf-8',
+                timeout: 30000,
+                stdio: ['pipe', 'pipe', 'pipe']
+            });
+
+            const lines = output.trim().split('\n');
+            for (const line of lines) {
+                if (line) {
+                    const repo = sanitizar(line);
+                    if (repo) repos.push(repo);
+                }
+            }
+
+            hasMore = lines.length === MAX_PAGE_SIZE;
+            page++;
+        } catch (e) {
+            console.error(`Aviso: Erro ao buscar repositórios (página ${page}). Continuando...`);
+            hasMore = false;
+        }
+    }
+
+    return repos;
+}
+
+/**
+ * Lista branches principais de um repositório
+ * Busca apenas branches comuns (main, master, develop, etc) para melhor performance
+ */
+function buscarBranchesDoRepositorio(repo) {
+    const mainBranches = ['main', 'master', 'develop', 'dev', 'staging', 'production', 'prod'];
+    const branches = [];
+
+    try {
+        // Primeiro, tenta obter a branch padrão
+        const defaultBranchCmd = `gh api "repos/${repo}" --jq ".default_branch"`;
+        const defaultBranch = execSync(defaultBranchCmd, {
+            encoding: 'utf-8',
+            timeout: 30000,
+            stdio: ['pipe', 'pipe', 'pipe']
+        }).trim();
+
+        if (defaultBranch) {
+            branches.push(defaultBranch);
+        }
+    } catch (e) {
+        // Se falhar, usa lista padrão
+    }
+
+    // Adiciona branches principais que não são a padrão
+    for (const branch of mainBranches) {
+        if (!branches.includes(branch)) {
+            branches.push(branch);
+        }
+    }
+
+    return branches;
+}
+
+/**
+ * Busca commits de um usuário em um repositório específico
+ */
+function buscarCommitsNoRepositorio(repo, usuario, inicio, fim, tipoData) {
+    const commits = [];
+
+    // Buscar branches do repositório
+    const branches = buscarBranchesDoRepositorio(repo);
+    const seenShas = new Set();  // Deduplicar commits por SHA
+
+    for (const branch of branches) {
+        let page = 1;
+        let hasMore = true;
+
+        while (hasMore && page <= 10) {  // Limite de páginas por branch
+            try {
+                // Buscar commits na branch específica
+                const cmd = `gh api "repos/${repo}/commits?author=${usuario}&sha=${branch}&since=${inicio}T00:00:00Z&until=${fim}T23:59:59Z&per_page=${MAX_COMMITS_PER_PAGE}&page=${page}" --jq ".[]"`;
+
+                const output = execSync(cmd, {
+                    encoding: 'utf-8',
+                    timeout: 30000,
+                    stdio: ['pipe', 'pipe', 'pipe']
+                });
+
+                const lines = output.trim().split('\n');
+
+                for (const line of lines) {
+                    if (!line) continue;
+                    try {
+                        const parsed = JSON.parse(line);
+                        const sha = sanitizar(parsed.sha);
+                        const dateField = tipoData === 'author' ? parsed.commit.author.date : parsed.commit.commitmitter.date;
+
+                        if (sha && /^[a-f0-9]{40}$/i.test(sha) && dateField && !seenShas.has(sha)) {
+                            seenShas.add(sha);
+                            commits.push({ repo, sha, date: dateField });
+                        }
+                    } catch (parseError) {
+                        // Ignorar linhas inválidas
+                    }
+                }
+
+                hasMore = lines.length === MAX_COMMITS_PER_PAGE;
+                page++;
+            } catch (e) {
+                break;  // Sem mais resultados ou erro
+            }
+        }
+    }
+
+    return commits;
+}
+
+/**
+ * Busca commits de um usuário em todos os repositórios de uma organização
+ */
+function buscarCommitsPorOrganizacao(usuario, inicio, fim, org, tipoData) {
+    console.error(`Listando repositórios da organização ${org}...`);
+    const repos = buscarRepositoriosDaOrganizacao(org);
+    console.error(`Encontrados ${repos.length} repositório(s).`);
+
+    const allCommits = [];
+    const seenShas = new Set();  // Deduplicar por SHA
+
+    // Criar barra de progresso
+    const progressBar = new ProgressBar(repos.length, 'Buscando repos');
+
+    for (const repo of repos) {
+        const commits = buscarCommitsNoRepositorio(repo, usuario, inicio, fim, tipoData);
+
+        for (const commit of commits) {
+            if (!seenShas.has(commit.sha)) {
+                seenShas.add(commit.sha);
+                allCommits.push(commit);
+            }
+        }
+
+        // Atualizar progresso com informações extras
+        const extraInfo = `${repo} | +${commits.length} commits`;
+        progressBar.update(1, extraInfo);
+    }
+
+    // Completar progresso
+    progressBar.complete(`Total: ${allCommits.length} commits`);
+
+    // Ordenar por data descrescente
+    allCommits.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    return allCommits;
+}
 
 /**
  * Busca commits via API do GitHub com paginação
  * GitHub Search API limita a 100 resultados por página e 1000 totais
  */
 function buscarCommits(usuarioValidado, inicio, fim, orgValidada, tipoDataValidado) {
+    // Se há organização, usar estratégia de busca direta em cada repositório
+    // (API search não indexa todos os repositórios de uma organização)
+    if (orgValidada) {
+        return buscarCommitsPorOrganizacao(usuarioValidado, inicio, fim, orgValidada, tipoDataValidado);
+    }
+
+    // Caso contrário, usar API de busca (comportamento original)
     try {
         const query = buildQuery(usuarioValidado, inicio, fim, orgValidada, tipoDataValidado);
         const commits = [];
@@ -163,6 +402,10 @@ function buscarCommits(usuarioValidado, inicio, fim, orgValidada, tipoDataValida
             // Se falhar ao buscar o total, continua sem o contador
             console.error(`Aviso: Não foi possível obter o total de commits.`);
         }
+
+        // Criar barra de progresso (estimado em 10 páginas máximo)
+        const maxPages = Math.min(10, Math.ceil(totalCount / MAX_PAGE_SIZE) || 1);
+        const progressBar = new ProgressBar(maxPages, 'Buscando páginas');
 
         // Busca com paginação
         while (hasMore && page <= 10) {  // Max 10 páginas = 1000 resultados (limite da API)
@@ -196,7 +439,8 @@ function buscarCommits(usuarioValidado, inicio, fim, orgValidada, tipoDataValida
                 }
             }
 
-            console.error(`Página ${page}: ${pageCommits} commits recebidos.`);
+            // Atualizar progresso
+            progressBar.update(1, `Página ${page} | +${pageCommits} commits`);
 
             // Verifica se há mais páginas
             if (pageCommits === 0 || commits.length >= totalCount) {
@@ -206,7 +450,7 @@ function buscarCommits(usuarioValidado, inicio, fim, orgValidada, tipoDataValida
             page++;
         }
 
-        console.error(`Total de commits recuperados: ${commits.length}`);
+        progressBar.complete(`Total: ${commits.length} commits`);
 
         // Aviso sobre limite da API
         if (commits.length >= MAX_SEARCH_RESULTS) {
@@ -314,12 +558,13 @@ function main() {
         let totalCommits = 0;
         const results = {};
 
+        // Criar barra de progresso para processamento
+        const progressBar = new ProgressBar(Object.keys(byRepo).length, 'Obtendo stats');
+
         for (const [repo, shas] of Object.entries(byRepo)) {
             let repoAdditions = 0;
             let repoDeletions = 0;
             const repoCount = shas.length;
-
-            console.error(`Processando ${repo} (${repoCount} commits)...`);
 
             for (const sha of shas) {
                 const stats = getCommitStats(repo, sha);
@@ -336,7 +581,12 @@ function main() {
             };
             totalAdditions += repoAdditions;
             totalDeletions += repoDeletions;
+
+            // Atualizar progresso
+            progressBar.update(1, `${repo}`);
         }
+
+        progressBar.complete();
 
         // Exibir resultados
         exibirResultados(results, totalCommits, totalAdditions, totalDeletions, usuario, dataInicio, dataFim);
