@@ -62,13 +62,18 @@ node get_commit_stats.js <usuario> -i <data_inicio> [opcoes]
 
 ### Opções
 
-| Opção | Curta | Descrição | Obrigatório |
-|-------|-------|-----------|-------------|
-| `--inicio` | `-i` | Data de início (YYYY-MM-DD) | Sim |
-| `--fim` | `-f` | Data final (YYYY-MM-DD) | Não |
-| `--org` | `-o` | Filtrar por organização | Não |
-| `--version` | `-V` | Mostrar versão | Não |
-| `--help` | `-h` | Mostrar ajuda | Não |
+| Opção | Curta | Descrição | Obrigatório | Padrão |
+|-------|-------|-----------|-------------|--------|
+| `--inicio` | `-i` | Data de início (YYYY-MM-DD) | Sim | - |
+| `--fim` | `-f` | Data final (YYYY-MM-DD) | Não | Data atual |
+| `--org` | `-o` | Filtrar por organização | Não | - |
+| `--tipo-data` | `-t` | Tipo de data para filtrar | Não | `committer` |
+| `--version` | `-V` | Mostrar versão | Não | - |
+| `--help` | `-h` | Mostrar ajuda | Não | - |
+
+**Tipos de data (`--tipo-data`):**
+- `author` - Data em que o commit foi **originalmente criado** (útil para identificar quando o trabalho foi feito)
+- `committer` - Data em que o commit foi **aplicado ao branch** (inclui merges e rebases) |
 
 ### Comportamento Padrão
 
@@ -107,12 +112,84 @@ node get_commit_stats.js usuario-exemplo -i 2026-01-01 -o minha-organizacao
 node get_commit_stats.js usuario-exemplo -i 2026-01-01 -f 2026-03-31 -o minha-organizacao
 ```
 
+### Filtrar por data de criação do commit (author-date)
+
+```bash
+# Busca commits pela data em que foram originalmente criados
+# Útil para ver quando o trabalho foi realmente feito
+node get_commit_stats.js usuario-exemplo -i 2026-01-01 -t author
+```
+
+### Filtrar por data de merge/rebase (committer-date)
+
+```bash
+# Busca commits pela data em que foram aplicados ao branch (padrão)
+# Útil para ver quando as mudanças chegaram no branch
+node get_commit_stats.js usuario-exemplo -i 2026-01-01 -t committer
+```
+
 ## Formato de Data
 
 As datas devem seguir obrigatoriamente o formato **YYYY-MM-DD**:
 
 - ✅ Válido: `2026-01-15`, `2026-12-31`
 - ❌ Inválido: `01/01/2026`, `15-01-2026`, `2026/01/15`
+
+## Detalhes Técnicos
+
+### Estratégia de Busca
+
+O script usa duas estratégias diferentes dependendo dos parâmetros:
+
+1. **Sem organização** (busca global):
+   - Usa `gh api search/commits` da API do GitHub
+   - **Limite:** Máximo de 1000 resultados (limitação da API)
+   - **Ordenação:** Do mais recente para o mais antigo
+   - **Aviso:** Para períodos muito grandes, some resultados podem não aparecer
+
+2. **Com organização** (busca detalhada):
+   - Itera sobre **todos os repositórios** da organização
+   - Busca commits em cada repositório individualmente
+   - **Vantagem:** Sem limite de 1000 resultados
+   - **Deducação:** Commits duplicados são removidos automaticamente (por SHA)
+   - **Busca em branches:** Busca nas branches principais (main, master, develop, etc)
+
+### Tipos de Data
+
+| Tipo | Descrição | Caso de uso |
+|------|-----------|-------------|
+| `author` | Data de criação original do commit | Ver quando o trabalho foi feito |
+| `committer` | Data de aplicação no branch (merge/rebase) | Ver quando chegou no branch |
+
+**Exemplo de diferença:**
+```
+# Commit criado em 2025-12-01, mas merged em 2026-01-15
+# Com --tipo-data author: aparece se o período incluir 2025-12-01
+# Com --tipo-data committer: aparece se o período incluir 2026-01-15
+```
+
+### Barra de Progresso
+
+O script exibe barras de progresso visuais durante a execução:
+- **Buscando repos:** Progresso ao iterar repositórios da organização
+- **Buscando páginas:** Progresso ao buscar páginas da API
+- **Obtendo stats:** Progresso ao buscar estatísticas de cada commit
+
+Cada barra mostra:
+- Progresso visual `[=====>     ]`
+- Porcentagem concluída
+- Itens processados/total
+- ETA (tempo restante estimado)
+- Informações extras (repositório atual, commits encontrados, etc)
+
+### Limitações da API do GitHub
+
+| Limite | Valor | Contexto |
+|--------|-------|----------|
+| Resultados por página | 100 | GitHub Search API |
+| Resultados totais (search) | 1000 | GitHub Search API |
+| Repositórios por organização | 1000 | Limite de segurança |
+| Commits por página | 100 | GitHub Commits API |
 
 ## Exemplo de Output
 
@@ -172,6 +249,16 @@ TOTAL                                                45         +2.345          
 - Não há commits no período especificado
 - O usuário não tem commits públicos
 - Filtro de organização muito restritivo
+- Tipo de data incorreto (tente trocar `author`/`committer`)
+
+**Dica:** Se você fez commits em uma época mas eles aparecerem em outra data, tente trocar o tipo de data:
+```bash
+# Se não apareceu, tente com author-date
+node get_commit_stats.js usuario -i 2025-12-01 -t author
+
+# Ou com committer-date
+node get_commit_stats.js usuario -i 2026-01-15 -t committer
+```
 
 ### Erro de autenticação do GitHub
 
