@@ -59,6 +59,20 @@ function validarFormatoData(dataStr) {
 }
 
 /**
+ * Valida tipo de data para busca (author-date ou committer-date)
+ * author-date: Data em que o commit foi originalmente criado
+ * committer-date: Data em que o commit foi aplicado ao branch (merge/rebase)
+ */
+function validarTipoData(tipoData) {
+    const tiposValidos = ['author', 'committer'];
+    const valor = tipoData || 'committer'; // Padrão: committer-date
+    if (!tiposValidos.includes(valor)) {
+        throw new Error(`Tipo de data inválido: "${valor}". Use 'author' ou 'committer'.`);
+    }
+    return valor;
+}
+
+/**
  * Sanitiza string para uso seguro em comandos shell
  * Escapa caracteres especiais que poderiam ser usados para injeção
  */
@@ -80,6 +94,7 @@ program
     .requiredOption('-i, --inicio <data>', 'Data de início (YYYY-MM-DD)')
     .option('-f, --fim <data>', 'Data final (YYYY-MM-DD)')
     .option('-o, --org <organizacao>', 'Filtrar por organização')
+    .option('-t, --tipo-data <tipo>', 'Tipo de data para filtrar: "author" (data de criação do commit) ou "committer" (data de merge/rebase). Padrão: committer', 'committer')
     .parse();
 
 const options = program.opts();
@@ -98,16 +113,20 @@ if (!dataFim) {
 dataFim = validarFormatoData(dataFim);
 
 const org = options.org ? validarOrganizacao(options.org) : null;
+const tipoData = validarTipoData(options.tipoData);
 
 /**
  * Constrói query de busca para API do GitHub
  * Usa valores validados e sanitizados
  */
-function buildQuery(usuarioValidado, inicio, fim, orgValidada) {
-    let query = `author:${usuarioValidado}+committer-date:${inicio}..${fim}`;
+function buildQuery(usuarioValidado, inicio, fim, orgValidada, tipoDataValidado) {
+    const dataField = `${tipoDataValidado}-date`;
+    let query = `author:${usuarioValidado}+${dataField}:${inicio}..${fim}`;
     if (orgValidada) {
         query += `+org:${orgValidada}`;
     }
+    // Ordenar do mais recente para o mais antigo
+    query += `+sort:${dataField}-desc`;
     return query;
 }
 
@@ -120,9 +139,9 @@ const MAX_SEARCH_RESULTS = 1000;  // GitHub Search API: max 1000 resultados tota
  * Busca commits via API do GitHub com paginação
  * GitHub Search API limita a 100 resultados por página e 1000 totais
  */
-function buscarCommits(usuarioValidado, inicio, fim, orgValidada) {
+function buscarCommits(usuarioValidado, inicio, fim, orgValidada, tipoDataValidado) {
     try {
-        const query = buildQuery(usuarioValidado, inicio, fim, orgValidada);
+        const query = buildQuery(usuarioValidado, inicio, fim, orgValidada, tipoDataValidado);
         const commits = [];
         let page = 1;
         let hasMore = true;
@@ -266,12 +285,13 @@ function main() {
     try {
         console.error(`Buscando commits de ${usuario}...`);
         console.error(`Período: ${dataInicio} até ${dataFim}`);
+        console.error(`Tipo de data: ${tipoData}-date`);
         if (org) {
             console.error(`Organização: ${org}`);
         }
 
         // Buscar commits
-        const commits = buscarCommits(usuario, dataInicio, dataFim, org);
+        const commits = buscarCommits(usuario, dataInicio, dataFim, org, tipoData);
 
         if (commits.length === 0) {
             console.log('\nNenhum commit encontrado para o período especificado.');
