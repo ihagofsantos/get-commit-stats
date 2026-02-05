@@ -242,15 +242,28 @@ function buscarRepositoriosDaOrganizacao(orgValidada) {
 }
 
 /**
- * Lista branches principais de um repositório
- * Busca apenas branches comuns (main, master, develop, etc) para melhor performance
+ * Lista branches de um repositório via API do GitHub
+ * Prioriza branches principais e busca todas as branches disponíveis
  */
 function buscarBranchesDoRepositorio(repo) {
-    const mainBranches = ['main', 'master', 'develop', 'dev', 'staging', 'production', 'prod'];
     const branches = [];
+    const seenNames = new Set();
+    let page = 1;
+    let hasMore = true;
+    const MAX_BRANCHES = 100;  // Limite de segurança para repositórios muito grandes
+
+    // Padrões de branches principais (para priorização)
+    const mainPatterns = [
+        'main', 'master',
+        'develop', 'development', 'dev',
+        'staging', 'stage', 'stg',
+        'production', 'prod',
+        'release', 'hotfix',
+        'test', 'testing', 'qa'
+    ];
 
     try {
-        // Primeiro, tenta obter a branch padrão
+        // Primeiro, obter a branch padrão
         const defaultBranchCmd = `gh api "repos/${repo}" --jq ".default_branch"`;
         const defaultBranch = execSync(defaultBranchCmd, {
             encoding: 'utf-8',
@@ -258,17 +271,60 @@ function buscarBranchesDoRepositorio(repo) {
             stdio: ['pipe', 'pipe', 'pipe']
         }).trim();
 
-        if (defaultBranch) {
+        if (defaultBranch && !seenNames.has(defaultBranch)) {
             branches.push(defaultBranch);
+            seenNames.add(defaultBranch);
         }
     } catch (e) {
-        // Se falhar, usa lista padrão
+        // Se falhar ao obter branch padrão, continua sem ela
     }
 
-    // Adiciona branches principais que não são a padrão
-    for (const branch of mainBranches) {
-        if (!branches.includes(branch)) {
-            branches.push(branch);
+    // Buscar todas as branches via API
+    while (hasMore && branches.length < MAX_BRANCHES) {
+        try {
+            const cmd = `gh api "repos/${repo}/branches?per_page=${MAX_PAGE_SIZE}&page=${page}" --jq ".[].name"`;
+            const output = execSync(cmd, {
+                encoding: 'utf-8',
+                timeout: 30000,
+                stdio: ['pipe', 'pipe', 'pipe']
+            });
+
+            const lines = output.trim().split('\n');
+            const pageBranches = [];
+
+            // Primeiro, adiciona branches que correspondem aos padrões principais
+            for (const line of lines) {
+                if (!line) continue;
+                const branchName = sanitizar(line);
+                if (branchName && !seenNames.has(branchName)) {
+                    const lowerName = branchName.toLowerCase();
+                    // Verifica se corresponde a algum padrão principal
+                    const isMainBranch = mainPatterns.some(pattern => lowerName === pattern || lowerName.startsWith(pattern + '-') || lowerName.endsWith('-' + pattern));
+                    if (isMainBranch) {
+                        pageBranches.push(branchName);
+                        seenNames.add(branchName);
+                    }
+                }
+            }
+
+            // Depois, adiciona as demais branches da página
+            for (const line of lines) {
+                if (!line) continue;
+                const branchName = sanitizar(line);
+                if (branchName && !seenNames.has(branchName)) {
+                    pageBranches.push(branchName);
+                    seenNames.add(branchName);
+                }
+            }
+
+            // Adiciona as branches desta página à lista principal
+            branches.push(...pageBranches);
+
+            hasMore = lines.length === MAX_PAGE_SIZE;
+            page++;
+        } catch (e) {
+            console.error(`Aviso: Erro ao buscar branches (página ${page}) de ${repo}. Continuando...`);
+            hasMore = false;
         }
     }
 

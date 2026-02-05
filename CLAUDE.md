@@ -72,7 +72,7 @@ node get_commit_stats.js usuario-exemplo -i 2026-01-01 -o minha-organizacao
 ### Funções de Busca
 - `buildQuery(usuario, inicio, fim, org, tipoData)`: Constrói query de busca para API
 - `buscarRepositoriosDaOrganizacao(org)`: Lista todos os repositórios de uma organização
-- `buscarBranchesDoRepositorio(repo)`: Lista branches principais (main, master, etc) + default branch
+- `buscarBranchesDoRepositorio(repo)`: Lista branches via API do GitHub, priorizando branches principais (main, master, develop, stage, staging, prod, production, release, hotfix, test, qa)
 - `buscarCommitsNoRepositorio(repo, usuario, inicio, fim, tipoData)`: Busca commits em um repositório específico com deduplicação por SHA
 - `buscarCommitsPorOrganizacao(usuario, inicio, fim, org, tipoData)`: Busca commits em todos os repos de uma org
 - `buscarCommits(usuario, inicio, fim, org, tipoData)`: Função principal que escolhe a estratégia (org vs search)
